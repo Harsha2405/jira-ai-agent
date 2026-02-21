@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 from google import genai
 import json
 import re
-import random
 import time
 
 load_dotenv()
@@ -92,17 +91,18 @@ def extract_with_gemini(text):
 
 
 # -------------------------
-# Simulated Deactivation
+# Deterministic Deactivation Engine
 # -------------------------
 def deactivate_user(email, system):
     print(f"Processing deactivation for {email} in {system}")
     time.sleep(1)
 
-    # Simulate mostly success
-    if random.choice([True, True, True, False]):
+    supported_systems = ["jira", "azure_devops", "confluence"]
+
+    if system.lower() in supported_systems:
         return "Success"
     else:
-        return "Failed"
+        return "Unsupported System"
 
 
 # -------------------------
@@ -205,7 +205,7 @@ async def jira_webhook(request: Request):
         auth=auth
     )
 
-    # Auto transition only if all systems succeed
+    # Move to Done only if all systems returned Success
     if all(status == "Success" for status in results.values()):
         transition_issue_to_done(issue_key)
 
