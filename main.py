@@ -11,41 +11,42 @@ load_dotenv()
 
 app = FastAPI()
 
-# -------------------------
+# =============================
 # ENV VARIABLES
-# -------------------------
+# =============================
 JIRA_BASE = os.getenv("JIRA_BASE")
-EMAIL = os.getenv("JIRA_EMAIL")
-API_TOKEN = os.getenv("JIRA_API_TOKEN")
+JIRA_EMAIL = os.getenv("JIRA_EMAIL")
+JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-auth = (EMAIL, API_TOKEN)
+auth = (JIRA_EMAIL, JIRA_API_TOKEN)
 
-# -------------------------
+# =============================
 # GEMINI CLIENT
-# -------------------------
+# =============================
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
-# -------------------------
+# =============================
 # CLEAN JIRA MARKUP
-# -------------------------
+# =============================
 def clean_jira_markup(text):
     pattern = r'\[([^\|]+)\|mailto:[^\]]+\]'
     return re.sub(pattern, r'\1', text)
 
 
-# -------------------------
+# =============================
 # GEMINI EXTRACTION
-# -------------------------
+# =============================
 def extract_with_gemini(text):
     if not client:
+        print("Gemini not initialized")
         return None
 
     prompt = f"""
-    Analyze this Jira ticket.
+    Analyze the following Jira ticket.
 
-    If it is a deactivation request, return ONLY valid JSON:
+    If it is a deactivation request, return ONLY JSON in this format:
 
     {{
       "action": "deactivate",
@@ -82,29 +83,33 @@ def extract_with_gemini(text):
         return None
 
 
-# -------------------------
-# DETERMINISTIC EXECUTION ENGINE
-# -------------------------
+# =============================
+# EXECUTION ENGINE
+# =============================
 def deactivate_user(email, system):
     print(f"Processing deactivation for {email} in {system}")
     time.sleep(1)
 
-    supported = ["jira", "azure_devops", "confluence"]
+    supported_systems = ["jira", "azure_devops", "confluence"]
 
-    if system.lower() in supported:
+    if system.lower() in supported_systems:
         return "Success"
     else:
         return "Unsupported System"
 
 
-# -------------------------
-# TRANSITION HELPER
-# -------------------------
+# =============================
+# TRANSITION FUNCTION
+# =============================
 def transition_issue(issue_key, target_status):
     transitions_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/transitions"
 
     response = requests.get(transitions_url, auth=auth)
     transitions = response.json().get("transitions", [])
+
+    print("Available transitions:")
+    for t in transitions:
+        print("->", t["name"])
 
     for t in transitions:
         if t["name"].lower() == target_status.lower():
@@ -119,13 +124,13 @@ def transition_issue(issue_key, target_status):
             print(f"Moved to {target_status}:", r.status_code)
             return True
 
-    print(f"No transition available to {target_status}")
+    print(f"Transition to {target_status} NOT available.")
     return False
 
 
-# -------------------------
+# =============================
 # WEBHOOK
-# -------------------------
+# =============================
 @app.post("/webhook")
 async def jira_webhook(request: Request):
     payload = await request.json()
@@ -156,9 +161,9 @@ async def jira_webhook(request: Request):
     for system in systems:
         results[system] = deactivate_user(email, system)
 
-    # -------------------------
-    # BUILD SUMMARY
-    # -------------------------
+    # =============================
+    # COMMENT SUMMARY
+    # =============================
     result_text = ""
     for sys, status in results.items():
         result_text += f"{sys.upper()} : {status}\n"
@@ -191,9 +196,14 @@ async def jira_webhook(request: Request):
         auth=auth
     )
 
-    # -------------------------
-    # SMART ROUTING (STEP 4)
-    # -------------------------
+    # =============================
+    # SMART WORKFLOW ROUTING
+    # =============================
+
+    # Step 1: Move to In Progress (if available)
+    transition_issue(issue_key, "In Progress")
+
+    # Step 2: Final Routing
     if all(status == "Success" for status in results.values()):
         transition_issue(issue_key, "Done")
 
@@ -201,6 +211,6 @@ async def jira_webhook(request: Request):
         transition_issue(issue_key, "In Review")
 
     else:
-        print("Failure detected — staying in current status.")
+        print("Failure detected — staying in workflow.")
 
     return {"status": "Processed"}
