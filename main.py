@@ -12,6 +12,9 @@ load_dotenv()
 
 app = FastAPI()
 
+# -------------------------
+# Environment Variables
+# -------------------------
 JIRA_BASE = os.getenv("JIRA_BASE")
 EMAIL = os.getenv("JIRA_EMAIL")
 API_TOKEN = os.getenv("JIRA_API_TOKEN")
@@ -19,18 +22,21 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 auth = (EMAIL, API_TOKEN)
 
-# Initialize Gemini client
+# -------------------------
+# Gemini Client Setup
+# -------------------------
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
 else:
     client = None
 
 
-# ---------------------------------
+# -------------------------
 # Gemini Extraction
-# ---------------------------------
+# -------------------------
 def extract_with_gemini(text):
     if not client:
+        print("Gemini client not initialized")
         return None
 
     prompt = f"""
@@ -56,7 +62,7 @@ def extract_with_gemini(text):
 
     try:
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
         )
 
@@ -76,23 +82,22 @@ def extract_with_gemini(text):
         return None
 
 
-# ---------------------------------
+# -------------------------
 # Simulated Deactivation Engine
-# ---------------------------------
+# -------------------------
 def deactivate_user(email, system):
     print(f"Processing deactivation for {email} in {system}")
     time.sleep(1)
 
-    # Simulate mostly success
     if random.choice([True, True, True, False]):
         return "Success"
     else:
         return "Failed"
 
 
-# ---------------------------------
+# -------------------------
 # Transition Issue to Done
-# ---------------------------------
+# -------------------------
 def transition_issue_to_done(issue_key):
     transitions_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/transitions"
 
@@ -115,9 +120,9 @@ def transition_issue_to_done(issue_key):
         print("Transition Response:", transition_response.status_code)
 
 
-# ---------------------------------
+# -------------------------
 # Webhook Endpoint
-# ---------------------------------
+# -------------------------
 @app.post("/webhook")
 async def jira_webhook(request: Request):
     payload = await request.json()
@@ -130,17 +135,17 @@ async def jira_webhook(request: Request):
 
     structured_data = extract_with_gemini(description)
 
-    # If Gemini fails, do nothing
+    # Ignore if Gemini failed
     if not structured_data:
         print("No structured data. Ignoring.")
         return {"status": "Ignored"}
 
     action = structured_data.get("action", "ignore")
 
-    # 🔒 Trigger only if action is deactivate
+    # Trigger only for deactivation
     if action.lower() != "deactivate":
         print("Not a deactivation request. Ignoring.")
-        return {"status": "Ignored - Not a deactivation request"}
+        return {"status": "Ignored - Not deactivation"}
 
     email = structured_data.get("email", "not found")
     systems = structured_data.get("systems", [])
@@ -166,7 +171,7 @@ async def jira_webhook(request: Request):
 
     comment_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/comment"
 
-    response = requests.post(
+    requests.post(
         comment_url,
         json={
             "body": {
@@ -188,9 +193,7 @@ async def jira_webhook(request: Request):
         auth=auth
     )
 
-    print("Jira Response:", response.status_code)
-
-    # Auto transition if all success
+    # Auto move to Done if all systems succeeded
     if all(status == "Success" for status in results.values()):
         transition_issue_to_done(issue_key)
 
