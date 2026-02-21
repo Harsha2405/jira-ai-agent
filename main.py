@@ -42,18 +42,24 @@ def extract_with_gemini(text):
     prompt = f"""
 Determine if this Jira ticket is requesting user access removal.
 
-Consider related words like:
+Consider words like:
 deactivate, disable, revoke, remove access,
 relieving, terminate access, offboard.
 
-If YES return ONLY JSON:
+If YES return JSON:
 {{
   "action": "deactivate",
-  "email": "exact-email-from-ticket",
-  "systems": ["jira", "azure_devops", "confluence"]
+  "email": "exact-email",
+  "systems": ["jira", "azure_devops", "confluence"],
+  "confidence": 0.0 to 1.0
 }}
 
-If NOT related to access removal return:
+If request is unclear or missing details, return:
+{{
+  "action": "incomplete"
+}}
+
+If unrelated, return:
 {{
   "action": "ignore"
 }}
@@ -86,9 +92,7 @@ Ticket:
 # EXECUTION ENGINE
 # =============================
 def deactivate_user(email, system):
-    print(f"Processing {email} in {system}")
     time.sleep(1)
-
     supported = ["jira", "azure_devops", "confluence"]
 
     if system.lower() in supported:
@@ -98,7 +102,7 @@ def deactivate_user(email, system):
 
 
 # =============================
-# TRANSITION FUNCTIONS
+# TRANSITION
 # =============================
 def transition_issue(issue_key, target_status):
     transitions_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/transitions"
@@ -108,15 +112,11 @@ def transition_issue(issue_key, target_status):
 
     for t in transitions:
         if t["name"].lower() == target_status.lower():
-            transition_id = t["id"]
-
-            r = requests.post(
+            requests.post(
                 transitions_url,
-                json={"transition": {"id": transition_id}},
+                json={"transition": {"id": t["id"]}},
                 auth=auth
             )
-
-            print(f"Moved to {target_status}:", r.status_code)
             return True
 
     return False
@@ -125,33 +125,26 @@ def transition_issue(issue_key, target_status):
 def smart_transition(issue_key, final_status):
     if transition_issue(issue_key, final_status):
         return
-
     if transition_issue(issue_key, "In Progress"):
         transition_issue(issue_key, final_status)
 
 
 # =============================
-# AI EXECUTIVE SUMMARY
+# EXECUTIVE SUMMARY
 # =============================
-def generate_executive_summary(email, results):
+def generate_executive_summary(email, results, confidence):
     if not client:
         return "Executive summary unavailable."
 
     prompt = f"""
-You are generating a professional executive summary.
+Generate a professional 3-line executive summary.
 
-IMPORTANT:
-- Use the exact email address below.
-- DO NOT replace it with placeholders.
-- Do NOT modify the email.
-
-User Email: {email}
+Use EXACT email: {email}
 Execution Results: {results}
+AI Confidence: {confidence}
 
-Write a short 3–4 line executive summary describing:
-- What was requested
-- Which systems were processed
-- Overall outcome
+Do NOT replace the email.
+Keep it executive-level.
 """
 
     try:
@@ -159,11 +152,9 @@ Write a short 3–4 line executive summary describing:
             model="gemini-2.5-flash",
             contents=prompt
         )
-
         return response.text.strip()
 
-    except Exception as e:
-        print("Executive Summary Error:", e)
+    except:
         return "Executive summary generation failed."
 
 
@@ -176,7 +167,6 @@ async def jira_webhook(request: Request):
 
     issue_key = payload["issue"]["key"]
     description = payload["issue"]["fields"].get("description", "")
-
     description = clean_jira_markup(description)
 
     structured = extract_with_gemini(description)
@@ -184,21 +174,57 @@ async def jira_webhook(request: Request):
     if not structured:
         return {"status": "Ignored"}
 
-    if structured.get("action", "").lower() != "deactivate":
+    action = structured.get("action", "").lower()
+
+    # =============================
+    # HANDLE INCOMPLETE REQUEST
+    # =============================
+    if action == "incomplete":
+        message = (
+            "⚠️ AI Agent detected insufficient information.\n\n"
+            "Please specify:\n"
+            "- Valid user email\n"
+            "- Target systems (Jira / Azure DevOps / Confluence)"
+        )
+
+        comment_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/comment"
+
+        requests.post(
+            comment_url,
+            json={
+                "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {"type": "paragraph",
+                         "content": [{"type": "text", "text": message}]}
+                    ]
+                }
+            },
+            auth=auth
+        )
+
+        smart_transition(issue_key, "In Review")
+        return {"status": "Incomplete"}
+
+    if action != "deactivate":
         return {"status": "Ignored"}
 
-    email = structured.get("email", "not found")
-    systems = structured.get("systems", ["jira"])
+    email = structured.get("email")
+    systems = structured.get("systems")
+    confidence = structured.get("confidence", 0.85)
+
+    # Additional validation safety check
+    if not email or not systems:
+        smart_transition(issue_key, "In Review")
+        return {"status": "Missing fields"}
 
     results = {}
 
     for system in systems:
         results[system] = deactivate_user(email, system)
 
-    # =============================
-    # EXECUTIVE SUMMARY
-    # =============================
-    exec_summary = generate_executive_summary(email, results)
+    exec_summary = generate_executive_summary(email, results, confidence)
 
     result_text = ""
     for sys, status in results.items():
@@ -207,6 +233,7 @@ async def jira_webhook(request: Request):
     final_comment = (
         f"🤖 AI Agent Processed Access Removal Request\n\n"
         f"User: {email}\n\n"
+        f"AI Confidence: {round(confidence*100)}%\n\n"
         f"Execution Results:\n"
         f"{result_text}\n"
         f"AI Executive Summary:\n{exec_summary}"
@@ -221,21 +248,14 @@ async def jira_webhook(request: Request):
                 "type": "doc",
                 "version": 1,
                 "content": [
-                    {
-                        "type": "paragraph",
-                        "content": [
-                            {"type": "text", "text": final_comment}
-                        ]
-                    }
+                    {"type": "paragraph",
+                     "content": [{"type": "text", "text": final_comment}]}
                 ]
             }
         },
         auth=auth
     )
 
-    # =============================
-    # WORKFLOW DECISION
-    # =============================
     if all(status == "Success" for status in results.values()):
         smart_transition(issue_key, "Done")
 
