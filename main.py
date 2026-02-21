@@ -26,24 +26,31 @@ else:
     client = None
 
 
-# ----------------------------
+# ---------------------------------
 # Gemini Extraction
-# ----------------------------
+# ---------------------------------
 def extract_with_gemini(text):
     if not client:
         return None
 
     prompt = f"""
-    Extract structured information from this Jira request.
+    Analyze this Jira ticket and determine if it is a deactivation request.
 
     Text:
     {text}
 
-    Return ONLY valid JSON in this format:
+    If it is a deactivation request, return ONLY valid JSON:
+
     {{
       "action": "deactivate",
       "email": "user@example.com",
       "systems": ["jira", "confluence", "azure_devops"]
+    }}
+
+    If it is NOT a deactivation request, return:
+
+    {{
+      "action": "ignore"
     }}
     """
 
@@ -69,22 +76,48 @@ def extract_with_gemini(text):
         return None
 
 
-# ----------------------------
+# ---------------------------------
 # Simulated Deactivation Engine
-# ----------------------------
+# ---------------------------------
 def deactivate_user(email, system):
     print(f"Processing deactivation for {email} in {system}")
     time.sleep(1)
 
+    # Simulate mostly success
     if random.choice([True, True, True, False]):
         return "Success"
     else:
         return "Failed"
 
 
-# ----------------------------
+# ---------------------------------
+# Transition Issue to Done
+# ---------------------------------
+def transition_issue_to_done(issue_key):
+    transitions_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/transitions"
+
+    response = requests.get(transitions_url, auth=auth)
+    transitions = response.json().get("transitions", [])
+
+    done_transition_id = None
+
+    for t in transitions:
+        if t["name"].lower() == "done":
+            done_transition_id = t["id"]
+            break
+
+    if done_transition_id:
+        transition_response = requests.post(
+            transitions_url,
+            json={"transition": {"id": done_transition_id}},
+            auth=auth
+        )
+        print("Transition Response:", transition_response.status_code)
+
+
+# ---------------------------------
 # Webhook Endpoint
-# ----------------------------
+# ---------------------------------
 @app.post("/webhook")
 async def jira_webhook(request: Request):
     payload = await request.json()
@@ -97,20 +130,26 @@ async def jira_webhook(request: Request):
 
     structured_data = extract_with_gemini(description)
 
-    if structured_data:
-        email = structured_data.get("email", "not found")
-        action = structured_data.get("action", "unknown")
-        systems = structured_data.get("systems", [])
-    else:
-        email_match = re.search(r'[\w\.-]+@[\w\.-]+', description)
-        email = email_match.group(0) if email_match else "not found"
-        action = "deactivate"
-        systems = ["jira"]
+    # If Gemini fails, do nothing
+    if not structured_data:
+        print("No structured data. Ignoring.")
+        return {"status": "Ignored"}
+
+    action = structured_data.get("action", "ignore")
+
+    # 🔒 Trigger only if action is deactivate
+    if action.lower() != "deactivate":
+        print("Not a deactivation request. Ignoring.")
+        return {"status": "Ignored - Not a deactivation request"}
+
+    email = structured_data.get("email", "not found")
+    systems = structured_data.get("systems", [])
 
     if not systems:
         systems = ["jira"]
 
     results = {}
+
     for system in systems:
         results[system] = deactivate_user(email, system)
 
@@ -119,8 +158,7 @@ async def jira_webhook(request: Request):
         result_lines += f"{sys.upper()} : {status}\n"
 
     summary_text = (
-        f"🤖 AI Agent Processed Request\n\n"
-        f"Action: {action}\n"
+        f"🤖 AI Agent Processed Deactivation Request\n\n"
         f"User: {email}\n\n"
         f"Execution Results:\n"
         f"{result_lines}"
@@ -151,6 +189,9 @@ async def jira_webhook(request: Request):
     )
 
     print("Jira Response:", response.status_code)
-    print("Jira Response Text:", response.text)
+
+    # Auto transition if all success
+    if all(status == "Success" for status in results.values()):
+        transition_issue_to_done(issue_key)
 
     return {"status": "Processed"}
