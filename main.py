@@ -33,34 +33,34 @@ def clean_jira_markup(text):
 
 
 # =============================
-# INTENT EXTRACTION (SMART)
+# INTENT EXTRACTION
 # =============================
 def extract_with_gemini(text):
     if not client:
         return None
 
     prompt = f"""
-    Determine if this Jira ticket is requesting user access removal.
+Determine if this Jira ticket is requesting user access removal.
 
-    Consider synonyms like:
-    deactivate, disable, revoke, remove access,
-    relieving, terminate access, offboard.
+Consider related words like:
+deactivate, disable, revoke, remove access,
+relieving, terminate access, offboard.
 
-    If YES, return JSON:
-    {{
-      "action": "deactivate",
-      "email": "user@example.com",
-      "systems": ["jira", "azure_devops", "confluence"]
-    }}
+If YES return ONLY JSON:
+{{
+  "action": "deactivate",
+  "email": "exact-email-from-ticket",
+  "systems": ["jira", "azure_devops", "confluence"]
+}}
 
-    If NO, return:
-    {{
-      "action": "ignore"
-    }}
+If NOT related to access removal return:
+{{
+  "action": "ignore"
+}}
 
-    Ticket:
-    {text}
-    """
+Ticket:
+{text}
+"""
 
     try:
         response = client.models.generate_content(
@@ -98,7 +98,7 @@ def deactivate_user(email, system):
 
 
 # =============================
-# TRANSITION FUNCTION
+# TRANSITION FUNCTIONS
 # =============================
 def transition_issue(issue_key, target_status):
     transitions_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/transitions"
@@ -138,23 +138,32 @@ def generate_executive_summary(email, results):
         return "Executive summary unavailable."
 
     prompt = f"""
-    Generate a short executive summary (3–4 lines)
-    for a deactivation automation result.
+You are generating a professional executive summary.
 
-    User: {email}
-    Results: {results}
+IMPORTANT:
+- Use the exact email address below.
+- DO NOT replace it with placeholders.
+- Do NOT modify the email.
 
-    Keep it professional.
-    """
+User Email: {email}
+Execution Results: {results}
+
+Write a short 3–4 line executive summary describing:
+- What was requested
+- Which systems were processed
+- Overall outcome
+"""
 
     try:
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt
         )
+
         return response.text.strip()
 
-    except:
+    except Exception as e:
+        print("Executive Summary Error:", e)
         return "Executive summary generation failed."
 
 
@@ -195,8 +204,8 @@ async def jira_webhook(request: Request):
     for sys, status in results.items():
         result_text += f"{sys.upper()} : {status}\n"
 
-    summary = (
-        f"🤖 AI Agent Processed Request\n\n"
+    final_comment = (
+        f"🤖 AI Agent Processed Access Removal Request\n\n"
         f"User: {email}\n\n"
         f"Execution Results:\n"
         f"{result_text}\n"
@@ -215,7 +224,7 @@ async def jira_webhook(request: Request):
                     {
                         "type": "paragraph",
                         "content": [
-                            {"type": "text", "text": summary}
+                            {"type": "text", "text": final_comment}
                         ]
                     }
                 ]
