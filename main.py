@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 import requests
 import os
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
 import json
 import re
 import random
@@ -15,23 +15,22 @@ app = FastAPI()
 JIRA_BASE = os.getenv("JIRA_BASE")
 EMAIL = os.getenv("JIRA_EMAIL")
 API_TOKEN = os.getenv("JIRA_API_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 auth = (EMAIL, API_TOKEN)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
+# Initialize Gemini client
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash-latest")
+    client = genai.Client(api_key=GEMINI_API_KEY)
 else:
-    model = None
+    client = None
 
 
 # ----------------------------
 # Gemini Extraction
 # ----------------------------
 def extract_with_gemini(text):
-    if not model:
+    if not client:
         return None
 
     prompt = f"""
@@ -49,9 +48,12 @@ def extract_with_gemini(text):
     """
 
     try:
-        response = model.generate_content(prompt)
-        raw_text = response.text.strip()
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt,
+        )
 
+        raw_text = response.text.strip()
         print("Gemini Raw Response:")
         print(raw_text)
 
@@ -72,12 +74,9 @@ def extract_with_gemini(text):
 # ----------------------------
 def deactivate_user(email, system):
     print(f"Processing deactivation for {email} in {system}")
-
-    # simulate processing time
     time.sleep(1)
 
-    # simulate success/failure randomly (for demo)
-    if random.choice([True, True, True, False]):  # mostly success
+    if random.choice([True, True, True, False]):
         return "Success"
     else:
         return "Failed"
@@ -111,14 +110,10 @@ async def jira_webhook(request: Request):
     if not systems:
         systems = ["jira"]
 
-    # Execute simulated deactivation
     results = {}
-
     for system in systems:
-        result = deactivate_user(email, system)
-        results[system] = result
+        results[system] = deactivate_user(email, system)
 
-    # Format execution summary
     result_lines = ""
     for sys, status in results.items():
         result_lines += f"{sys.upper()} : {status}\n"
@@ -158,4 +153,4 @@ async def jira_webhook(request: Request):
     print("Jira Response:", response.status_code)
     print("Jira Response Text:", response.text)
 
-    return {"status": "Processed with execution"}
+    return {"status": "Processed"}
