@@ -12,7 +12,7 @@ load_dotenv()
 app = FastAPI()
 
 # -------------------------
-# Environment Variables
+# ENV VARIABLES
 # -------------------------
 JIRA_BASE = os.getenv("JIRA_BASE")
 EMAIL = os.getenv("JIRA_EMAIL")
@@ -22,68 +22,60 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 auth = (EMAIL, API_TOKEN)
 
 # -------------------------
-# Gemini Client Setup
+# GEMINI CLIENT
 # -------------------------
-if GEMINI_API_KEY:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-else:
-    client = None
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
 # -------------------------
-# Clean Jira Markup
+# CLEAN JIRA MARKUP
 # -------------------------
 def clean_jira_markup(text):
-    # Convert [john@gmail.com|mailto:krishna@gmail.com] → john@gmail.com
     pattern = r'\[([^\|]+)\|mailto:[^\]]+\]'
     return re.sub(pattern, r'\1', text)
 
 
 # -------------------------
-# Gemini Extraction
+# GEMINI EXTRACTION
 # -------------------------
 def extract_with_gemini(text):
     if not client:
-        print("Gemini client not initialized")
         return None
 
     prompt = f"""
-    Analyze this Jira ticket and determine if it is a deactivation request.
-
-    Text:
-    {text}
+    Analyze this Jira ticket.
 
     If it is a deactivation request, return ONLY valid JSON:
 
     {{
       "action": "deactivate",
       "email": "user@example.com",
-      "systems": ["jira", "confluence", "azure_devops"]
+      "systems": ["jira", "azure_devops", "confluence"]
     }}
 
-    If it is NOT a deactivation request, return:
-
+    If not related to deactivation, return:
     {{
       "action": "ignore"
     }}
+
+    Ticket:
+    {text}
     """
 
     try:
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=prompt,
+            contents=prompt
         )
 
-        raw_text = response.text.strip()
-        print("Gemini Raw Response:")
-        print(raw_text)
+        raw = response.text.strip()
+        print("Gemini Raw Response:", raw)
 
-        json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            return json.loads(match.group())
 
-        if json_match:
-            return json.loads(json_match.group())
-        else:
-            return None
+        return None
 
     except Exception as e:
         print("Gemini Error:", e)
@@ -91,47 +83,48 @@ def extract_with_gemini(text):
 
 
 # -------------------------
-# Deterministic Deactivation Engine
+# DETERMINISTIC EXECUTION ENGINE
 # -------------------------
 def deactivate_user(email, system):
     print(f"Processing deactivation for {email} in {system}")
     time.sleep(1)
 
-    supported_systems = ["jira", "azure_devops", "confluence"]
+    supported = ["jira", "azure_devops", "confluence"]
 
-    if system.lower() in supported_systems:
+    if system.lower() in supported:
         return "Success"
     else:
         return "Unsupported System"
 
 
 # -------------------------
-# Transition to Done
+# TRANSITION HELPER
 # -------------------------
-def transition_issue_to_done(issue_key):
+def transition_issue(issue_key, target_status):
     transitions_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/transitions"
 
     response = requests.get(transitions_url, auth=auth)
     transitions = response.json().get("transitions", [])
 
-    done_transition_id = None
-
     for t in transitions:
-        if t["name"].lower() == "done":
-            done_transition_id = t["id"]
-            break
+        if t["name"].lower() == target_status.lower():
+            transition_id = t["id"]
 
-    if done_transition_id:
-        transition_response = requests.post(
-            transitions_url,
-            json={"transition": {"id": done_transition_id}},
-            auth=auth
-        )
-        print("Transition Response:", transition_response.status_code)
+            r = requests.post(
+                transitions_url,
+                json={"transition": {"id": transition_id}},
+                auth=auth
+            )
+
+            print(f"Moved to {target_status}:", r.status_code)
+            return True
+
+    print(f"No transition available to {target_status}")
+    return False
 
 
 # -------------------------
-# Webhook Endpoint
+# WEBHOOK
 # -------------------------
 @app.post("/webhook")
 async def jira_webhook(request: Request):
@@ -140,45 +133,41 @@ async def jira_webhook(request: Request):
     issue_key = payload["issue"]["key"]
     description = payload["issue"]["fields"].get("description", "")
 
-    # Clean Jira formatting before AI processing
     description = clean_jira_markup(description)
 
     print("Issue:", issue_key)
-    print("Cleaned Description:", description)
+    print("Description:", description)
 
-    structured_data = extract_with_gemini(description)
+    structured = extract_with_gemini(description)
 
-    if not structured_data:
-        print("No structured data. Ignoring.")
+    if not structured:
+        print("No structured data.")
         return {"status": "Ignored"}
 
-    action = structured_data.get("action", "ignore")
+    if structured.get("action", "").lower() != "deactivate":
+        print("Not a deactivation request.")
+        return {"status": "Ignored"}
 
-    # Only trigger for deactivation
-    if action.lower() != "deactivate":
-        print("Not a deactivation request. Ignoring.")
-        return {"status": "Ignored - Not deactivation"}
-
-    email = structured_data.get("email", "not found")
-    systems = structured_data.get("systems", [])
-
-    if not systems:
-        systems = ["jira"]
+    email = structured.get("email", "not found")
+    systems = structured.get("systems", ["jira"])
 
     results = {}
 
     for system in systems:
         results[system] = deactivate_user(email, system)
 
-    result_lines = ""
+    # -------------------------
+    # BUILD SUMMARY
+    # -------------------------
+    result_text = ""
     for sys, status in results.items():
-        result_lines += f"{sys.upper()} : {status}\n"
+        result_text += f"{sys.upper()} : {status}\n"
 
-    summary_text = (
+    summary = (
         f"🤖 AI Agent Processed Deactivation Request\n\n"
         f"User: {email}\n\n"
         f"Execution Results:\n"
-        f"{result_lines}"
+        f"{result_text}"
     )
 
     comment_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/comment"
@@ -193,10 +182,7 @@ async def jira_webhook(request: Request):
                     {
                         "type": "paragraph",
                         "content": [
-                            {
-                                "type": "text",
-                                "text": summary_text
-                            }
+                            {"type": "text", "text": summary}
                         ]
                     }
                 ]
@@ -205,8 +191,16 @@ async def jira_webhook(request: Request):
         auth=auth
     )
 
-    # Move to Done only if all systems returned Success
+    # -------------------------
+    # SMART ROUTING (STEP 4)
+    # -------------------------
     if all(status == "Success" for status in results.values()):
-        transition_issue_to_done(issue_key)
+        transition_issue(issue_key, "Done")
+
+    elif any(status == "Unsupported System" for status in results.values()):
+        transition_issue(issue_key, "In Review")
+
+    else:
+        print("Failure detected — staying in current status.")
 
     return {"status": "Processed"}
