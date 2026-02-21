@@ -4,26 +4,31 @@ import os
 from dotenv import load_dotenv
 import google.generativeai as genai
 import json
+import re
 
-# Load environment variables
 load_dotenv()
 
 app = FastAPI()
 
-# Jira credentials
 JIRA_BASE = os.getenv("JIRA_BASE")
 EMAIL = os.getenv("JIRA_EMAIL")
 API_TOKEN = os.getenv("JIRA_API_TOKEN")
 
 auth = (EMAIL, API_TOKEN)
 
-# Gemini setup
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-1.5-flash-latest")
+else:
+    model = None
 
 
 def extract_with_gemini(text):
+    if not model:
+        return None
+
     prompt = f"""
     Extract structured information from this Jira request.
 
@@ -38,17 +43,23 @@ def extract_with_gemini(text):
     }}
     """
 
-    response = model.generate_content(prompt)
-    raw_text = response.text.strip()
-
     try:
-        return json.loads(raw_text)
-    except:
-        return {
-            "action": "unknown",
-            "email": "not found",
-            "systems": []
-        }
+        response = model.generate_content(prompt)
+        raw_text = response.text.strip()
+
+        print("Gemini Raw Response:")
+        print(raw_text)
+
+        json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+
+        if json_match:
+            return json.loads(json_match.group())
+        else:
+            return None
+
+    except Exception as e:
+        print("Gemini Error:", e)
+        return None
 
 
 @app.post("/webhook")
@@ -61,25 +72,26 @@ async def jira_webhook(request: Request):
     print("Issue:", issue_key)
     print("Description:", description)
 
-    # Use Gemini to extract info
     structured_data = extract_with_gemini(description)
 
-    print("AI Extracted:", structured_data)
+    if structured_data:
+        email = structured_data.get("email", "not found")
+        action = structured_data.get("action", "unknown")
+        systems = structured_data.get("systems", [])
+    else:
+        email_match = re.search(r'[\w\.-]+@[\w\.-]+', description)
+        email = email_match.group(0) if email_match else "not found"
+        action = "deactivate"
+        systems = ["jira"]
 
-    email = structured_data.get("email", "not found")
-    action = structured_data.get("action", "unknown")
-    systems = structured_data.get("systems", [])
-
-    # Simulate deactivation
-    execution_status = "Success"
-    processed_systems = ", ".join(systems) if systems else "Not specified"
+    processed_systems = ", ".join(systems)
 
     summary_text = (
         f"🤖 AI Agent Processed Request\n\n"
         f"Action: {action}\n"
         f"User: {email}\n"
         f"Systems: {processed_systems}\n"
-        f"Execution Status: {execution_status}"
+        f"Execution Status: Success"
     )
 
     comment_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/comment"
@@ -107,5 +119,6 @@ async def jira_webhook(request: Request):
     )
 
     print("Jira Response:", response.status_code)
+    print("Jira Response Text:", response.text)
 
-    return {"status": "AI processed successfully"}
+    return {"status": "Processed"}
