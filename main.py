@@ -32,6 +32,15 @@ else:
 
 
 # -------------------------
+# Clean Jira Markup
+# -------------------------
+def clean_jira_markup(text):
+    # Convert [john@gmail.com|mailto:krishna@gmail.com] → john@gmail.com
+    pattern = r'\[([^\|]+)\|mailto:[^\]]+\]'
+    return re.sub(pattern, r'\1', text)
+
+
+# -------------------------
 # Gemini Extraction
 # -------------------------
 def extract_with_gemini(text):
@@ -83,12 +92,13 @@ def extract_with_gemini(text):
 
 
 # -------------------------
-# Simulated Deactivation Engine
+# Simulated Deactivation
 # -------------------------
 def deactivate_user(email, system):
     print(f"Processing deactivation for {email} in {system}")
     time.sleep(1)
 
+    # Simulate mostly success
     if random.choice([True, True, True, False]):
         return "Success"
     else:
@@ -96,7 +106,7 @@ def deactivate_user(email, system):
 
 
 # -------------------------
-# Transition Issue to Done
+# Transition to Done
 # -------------------------
 def transition_issue_to_done(issue_key):
     transitions_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/transitions"
@@ -130,19 +140,21 @@ async def jira_webhook(request: Request):
     issue_key = payload["issue"]["key"]
     description = payload["issue"]["fields"].get("description", "")
 
+    # Clean Jira formatting before AI processing
+    description = clean_jira_markup(description)
+
     print("Issue:", issue_key)
-    print("Description:", description)
+    print("Cleaned Description:", description)
 
     structured_data = extract_with_gemini(description)
 
-    # Ignore if Gemini failed
     if not structured_data:
         print("No structured data. Ignoring.")
         return {"status": "Ignored"}
 
     action = structured_data.get("action", "ignore")
 
-    # Trigger only for deactivation
+    # Only trigger for deactivation
     if action.lower() != "deactivate":
         print("Not a deactivation request. Ignoring.")
         return {"status": "Ignored - Not deactivation"}
@@ -193,7 +205,7 @@ async def jira_webhook(request: Request):
         auth=auth
     )
 
-    # Auto move to Done if all systems succeeded
+    # Auto transition only if all systems succeed
     if all(status == "Success" for status in results.values()):
         transition_issue_to_done(issue_key)
 
