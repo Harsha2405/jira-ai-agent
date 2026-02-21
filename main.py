@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 import json
 import re
+import random
+import time
 
 load_dotenv()
 
@@ -25,6 +27,9 @@ else:
     model = None
 
 
+# ----------------------------
+# Gemini Extraction
+# ----------------------------
 def extract_with_gemini(text):
     if not model:
         return None
@@ -62,6 +67,25 @@ def extract_with_gemini(text):
         return None
 
 
+# ----------------------------
+# Simulated Deactivation Engine
+# ----------------------------
+def deactivate_user(email, system):
+    print(f"Processing deactivation for {email} in {system}")
+
+    # simulate processing time
+    time.sleep(1)
+
+    # simulate success/failure randomly (for demo)
+    if random.choice([True, True, True, False]):  # mostly success
+        return "Success"
+    else:
+        return "Failed"
+
+
+# ----------------------------
+# Webhook Endpoint
+# ----------------------------
 @app.post("/webhook")
 async def jira_webhook(request: Request):
     payload = await request.json()
@@ -84,14 +108,27 @@ async def jira_webhook(request: Request):
         action = "deactivate"
         systems = ["jira"]
 
-    processed_systems = ", ".join(systems)
+    if not systems:
+        systems = ["jira"]
+
+    # Execute simulated deactivation
+    results = {}
+
+    for system in systems:
+        result = deactivate_user(email, system)
+        results[system] = result
+
+    # Format execution summary
+    result_lines = ""
+    for sys, status in results.items():
+        result_lines += f"{sys.upper()} : {status}\n"
 
     summary_text = (
         f"🤖 AI Agent Processed Request\n\n"
         f"Action: {action}\n"
-        f"User: {email}\n"
-        f"Systems: {processed_systems}\n"
-        f"Execution Status: Success"
+        f"User: {email}\n\n"
+        f"Execution Results:\n"
+        f"{result_lines}"
     )
 
     comment_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/comment"
@@ -121,4 +158,4 @@ async def jira_webhook(request: Request):
     print("Jira Response:", response.status_code)
     print("Jira Response Text:", response.text)
 
-    return {"status": "Processed"}
+    return {"status": "Processed with execution"}
