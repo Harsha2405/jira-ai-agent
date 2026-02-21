@@ -21,9 +21,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 auth = (JIRA_EMAIL, JIRA_API_TOKEN)
 
-# =============================
-# GEMINI CLIENT
-# =============================
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
@@ -36,25 +33,27 @@ def clean_jira_markup(text):
 
 
 # =============================
-# GEMINI EXTRACTION
+# INTENT EXTRACTION (SMART)
 # =============================
 def extract_with_gemini(text):
     if not client:
-        print("Gemini not initialized")
         return None
 
     prompt = f"""
-    Analyze the following Jira ticket.
+    Determine if this Jira ticket is requesting user access removal.
 
-    If it is a deactivation request, return ONLY JSON in this format:
+    Consider synonyms like:
+    deactivate, disable, revoke, remove access,
+    relieving, terminate access, offboard.
 
+    If YES, return JSON:
     {{
       "action": "deactivate",
       "email": "user@example.com",
       "systems": ["jira", "azure_devops", "confluence"]
     }}
 
-    If not related to deactivation, return:
+    If NO, return:
     {{
       "action": "ignore"
     }}
@@ -70,7 +69,7 @@ def extract_with_gemini(text):
         )
 
         raw = response.text.strip()
-        print("Gemini Raw Response:", raw)
+        print("Gemini Raw:", raw)
 
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         if match:
@@ -87,12 +86,12 @@ def extract_with_gemini(text):
 # EXECUTION ENGINE
 # =============================
 def deactivate_user(email, system):
-    print(f"Processing deactivation for {email} in {system}")
+    print(f"Processing {email} in {system}")
     time.sleep(1)
 
-    supported_systems = ["jira", "azure_devops", "confluence"]
+    supported = ["jira", "azure_devops", "confluence"]
 
-    if system.lower() in supported_systems:
+    if system.lower() in supported:
         return "Success"
     else:
         return "Unsupported System"
@@ -107,10 +106,6 @@ def transition_issue(issue_key, target_status):
     response = requests.get(transitions_url, auth=auth)
     transitions = response.json().get("transitions", [])
 
-    print("Available transitions:")
-    for t in transitions:
-        print("->", t["name"])
-
     for t in transitions:
         if t["name"].lower() == target_status.lower():
             transition_id = t["id"]
@@ -124,8 +119,43 @@ def transition_issue(issue_key, target_status):
             print(f"Moved to {target_status}:", r.status_code)
             return True
 
-    print(f"Transition to {target_status} NOT available.")
     return False
+
+
+def smart_transition(issue_key, final_status):
+    if transition_issue(issue_key, final_status):
+        return
+
+    if transition_issue(issue_key, "In Progress"):
+        transition_issue(issue_key, final_status)
+
+
+# =============================
+# AI EXECUTIVE SUMMARY
+# =============================
+def generate_executive_summary(email, results):
+    if not client:
+        return "Executive summary unavailable."
+
+    prompt = f"""
+    Generate a short executive summary (3–4 lines)
+    for a deactivation automation result.
+
+    User: {email}
+    Results: {results}
+
+    Keep it professional.
+    """
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+        return response.text.strip()
+
+    except:
+        return "Executive summary generation failed."
 
 
 # =============================
@@ -140,17 +170,12 @@ async def jira_webhook(request: Request):
 
     description = clean_jira_markup(description)
 
-    print("Issue:", issue_key)
-    print("Description:", description)
-
     structured = extract_with_gemini(description)
 
     if not structured:
-        print("No structured data.")
         return {"status": "Ignored"}
 
     if structured.get("action", "").lower() != "deactivate":
-        print("Not a deactivation request.")
         return {"status": "Ignored"}
 
     email = structured.get("email", "not found")
@@ -162,17 +187,20 @@ async def jira_webhook(request: Request):
         results[system] = deactivate_user(email, system)
 
     # =============================
-    # COMMENT SUMMARY
+    # EXECUTIVE SUMMARY
     # =============================
+    exec_summary = generate_executive_summary(email, results)
+
     result_text = ""
     for sys, status in results.items():
         result_text += f"{sys.upper()} : {status}\n"
 
     summary = (
-        f"🤖 AI Agent Processed Deactivation Request\n\n"
+        f"🤖 AI Agent Processed Request\n\n"
         f"User: {email}\n\n"
         f"Execution Results:\n"
-        f"{result_text}"
+        f"{result_text}\n"
+        f"AI Executive Summary:\n{exec_summary}"
     )
 
     comment_url = f"{JIRA_BASE}/rest/api/3/issue/{issue_key}/comment"
@@ -197,20 +225,12 @@ async def jira_webhook(request: Request):
     )
 
     # =============================
-    # SMART WORKFLOW ROUTING
+    # WORKFLOW DECISION
     # =============================
-
-    # Step 1: Move to In Progress (if available)
-    transition_issue(issue_key, "In Progress")
-
-    # Step 2: Final Routing
     if all(status == "Success" for status in results.values()):
-        transition_issue(issue_key, "Done")
+        smart_transition(issue_key, "Done")
 
     elif any(status == "Unsupported System" for status in results.values()):
-        transition_issue(issue_key, "In Review")
-
-    else:
-        print("Failure detected — staying in workflow.")
+        smart_transition(issue_key, "In Review")
 
     return {"status": "Processed"}
